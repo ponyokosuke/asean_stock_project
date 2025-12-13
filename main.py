@@ -3,11 +3,10 @@ import pandas as pd
 import datetime
 from pathlib import Path
 import sys
-from openpyxl import load_workbook # ★追加
-from openpyxl.styles import Alignment # ★追加
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment
 
 # --- CSVから stock_codes_list.py を生成する関数 ---
-# (変更なし)
 def update_stock_codes_list_file(csv_file_path):
     output_filename = "stock_codes_list.py"
     try:
@@ -81,7 +80,7 @@ def main():
         print("\nExcelファイルを作成しています...")
         df = pd.DataFrame(all_results)
         
-        # 1. 基本的な整形 (数値化、日付文字列化)
+        # 1. 基本的な整形
         df = data_processor.format_for_excel(df)
         
         # 2. 不要な列を削除
@@ -104,7 +103,7 @@ def main():
         df["Listed 'o' / Non Listed \"x\""] = "o"
         df["ShareInvestor Category Classification"] = df["Category Classification/ShareInvestor"]
         
-        # 3-4. 指定された列順を定義
+        # 3-4. 指定された列順を定義 (Current/Non-Current Loan 削除済み)
         target_order = [
             "Ref",
             "Name of Company",
@@ -112,6 +111,7 @@ def main():
             "Taka's comments",
             "Code",
             "Currency",
+            "Exchange Rate (to SGD)",
             "Remarks",
             "Listed 'o' / Non Listed \"x\"",
             "Visited (V) / Meeting Proposal (MP)",
@@ -124,15 +124,12 @@ def main():
             "GROSS PROFIT (Mil)",
             "OPERATING PROFIT (Mil)",
             "NET PROFIT (Group) (Mil)",
-            # ★★★ 変更: Owners -> Shareholders ★★★
             "NET PROFIT (Shareholders) (Mil)",
             "Minority Interest (Mil)",
             "Shareholders' Equity (Mil)",
             "Total Equity (Mil)",
             "TOTAL ASSET (Mil)",
             "Debt/Equity(%)",
-            "Current Loan (Mil)",
-            "Non-Current Loan (Mil)",
             "Loan (Mil)",
             "Loan/Equity (%)",
             "Summary of Business",
@@ -169,31 +166,38 @@ def main():
             # 1. まず保存
             df.to_excel(filename, index=False)
             
-            # 2. ★★★ 追加: openpyxlで開いて配置を修正 ★★★
+            # 2. openpyxlで開いて書式設定
             wb = load_workbook(filename)
             ws = wb.active
             
-            # 右揃えにしたい列名（日付文字列の列）
-            right_align_cols = ['FY']
-            
-            # 右揃えスタイル定義
             right_align = Alignment(horizontal='right')
             
-            # ヘッダー行から列番号を探す
-            target_col_indices = []
             for cell in ws[1]:
-                if cell.value in right_align_cols:
-                    target_col_indices.append(cell.column)
-            
-            # 対象列のセルを右揃えにする
-            for col_idx in target_col_indices:
-                # iter_cols は列ごとのセルをタプルで返す
-                for col_cells in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=2):
-                    for cell in col_cells:
-                        cell.alignment = right_align
+                col_name = str(cell.value)
+                col_idx = cell.column
+                
+                number_format = None
+                apply_alignment = False
+                
+                if "(Mil)" in col_name:
+                    number_format = '#,##0.000'
+                    apply_alignment = True
+                elif "(%)" in col_name or "%" in col_name:
+                    number_format = '0.00%'
+                    apply_alignment = True
+                elif col_name == "FY":
+                    apply_alignment = True
+                
+                if number_format or apply_alignment:
+                    for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                        for cell in row:
+                            if apply_alignment:
+                                cell.alignment = right_align
+                            if number_format:
+                                cell.number_format = number_format
             
             wb.save(filename)
-            print(f"★★★ 成功: {filename} に保存しました (右揃え適用完了) ★★★")
+            print(f"★★★ 成功: {filename} に保存しました (書式設定・右揃え適用完了) ★★★")
             
         except Exception as e:
             print(f"エラー: Excel保存に失敗しました ({e})")
