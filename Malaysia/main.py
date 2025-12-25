@@ -83,73 +83,70 @@ def main():
         # 1. 整形 ('000 単位, Dec 2024形式へ)
         df = data_processor.format_for_excel(df)
         
-        # 2. 不要な列を削除 (古い列名)
+        # 2. 不要な列を削除
         if "Sector /Industry" in df.columns:
             df = df.drop(columns=["Sector /Industry"])
             
         # 3. 指定された順番に並べ替え & 空列の追加
         df["Ref"] = range(1, len(df) + 1)
 
-        # ★変更: 空欄にする列のリスト
         empty_cols = [
-            "Taka's comments",
-            "Remarks",
-            "Visited (V) / Meeting Proposal (MP)",
-            "Access",
-            "Last Communications",
-            "Category Classification/\nShareInvestor", # 改行コード含む可能性を考慮
-            "Incorporated\n (IN / Year)",
-            "Category Classification/SGX",
-            "Sector & Industry/ SGX"
+            "ShareInvestor Category Classification", "Taka's comments", "Remarks", 
+            "Listed 'o' / Non Listed \"x\"", "Visited (V) / Meeting Proposal (MP)", 
+            "Segments", "Access", "Last Communications", 
+            "Number of Employee Previous (in 2024)", "Number of Employee Previous", 
+            "Incorporated (IN / Year)", "Category Classification SGX", "Sector /Industry SGX"
         ]
-        
-        # 空列を作成
         for col in empty_cols:
             df[col] = ""
-        
+            
         df["Listed 'o' / Non Listed \"x\""] = "o"
-
-        # ★変更: 新しいターゲットオーダー
+        df["ShareInvestor Category Classification"] = df["Category Classification/ShareInvestor"]
+        
+        # ★★★ 修正箇所: 列名を ('000) に変更し、Marketを追加 ★★★
         target_order = [
             "Ref",
             "Name of Company",
-            "Code",
-            "Listed 'o' / Non Listed \"x\"",
+            "Market", # ★追加: Market列
+            "ShareInvestor Category Classification",
             "Taka's comments",
+            "Code",
+            "Currency",
+            "Exchange Rate (to SGD)",
             "Remarks",
+            "Listed 'o' / Non Listed \"x\"",
             "Visited (V) / Meeting Proposal (MP)",
             "Website",
             "Major Shareholders",
-            "Currency",
-            "Exchange Rate (to SGD)",
             "FY",
-            "REVENUE SGD('000)", # リネーム後の名前
-            "Segments",
-            "PROFIT ('000)",
-            "GROSS PROFIT ('000)",
-            "OPERATING PROFIT ('000)",
-            "NET PROFIT (Group) ('000)",
-            "NET PROFIT (Shareholders) ('000)",
-            "Minority Interest ('000)",
-            "Shareholders' Equity ('000)",
-            "Total Equity ('000)",
-            "TOTAL ASSET ('000)",
-            "Debt/Equity(%)",
-            "Loan ('000)",
-            "Loan/Equity (%)",
-            "Summary of Business",
-            "Chairman / CEO",
-            "Address",
-            "Contact No.",
-            "Access",
-            "Last Communications",
-            "Number of Employee",
-            "Category Classification/YahooFin",
-            "Sector & Industry/YahooFin",
-            "Category Classification/\nShareInvestor",
-            "Incorporated\n (IN / Year)",
-            "Category Classification/SGX",
-            "Sector & Industry/ SGX"
+            "REVENUE ('000)", 
+            "Segments", 
+            "PROFIT ('000)", 
+            "GROSS PROFIT ('000)", 
+            "OPERATING PROFIT ('000)", 
+            "NET PROFIT (Group) ('000)", 
+            "NET PROFIT (Shareholders) ('000)", 
+            "Minority Interest ('000)", 
+            "Shareholders' Equity ('000)", 
+            "Total Equity ('000)", 
+            "TOTAL ASSET ('000)", 
+            "Debt/Equity(%)", 
+            "Loan ('000)", 
+            "Loan/Equity (%)", 
+            "Summary of Business", 
+            "Chairman / CEO", 
+            "Address", 
+            "Contact No.", 
+            "Access", 
+            "Last Communications", 
+            "Number of Employee", 
+            "Number of Employee Previous (in 2024)", 
+            "Number of Employee Previous", 
+            "Category Classification/ShareInvestor", 
+            "Sector & Industry ShareInvestor", 
+            "Incorporated (IN / Year)", 
+            "Category Classification SGX", 
+            "Sector /Industry SGX"
         ]
         
         # 列が存在しない場合は空文字で補完
@@ -158,7 +155,6 @@ def main():
                  df[col] = ""
         
         df = df.reindex(columns=target_order)
-        # 従業員数の列名変更
         df = df.rename(columns={"Number of Employee": "Number of Employee Current"})
 
         # ファイル名生成
@@ -186,8 +182,9 @@ def main():
                 number_format = None
                 apply_alignment = False
                 
-                # ★書式設定: マイナスはカッコ、カンマ区切り
+                # ★★★ 修正箇所: マイナスをカッコ表示に設定 ★★★
                 if "('000)" in col_name:
+                    # カンマ区切り + マイナスはカッコ表示 (例: (1,234))
                     number_format = '#,##0;(#,##0)'
                     apply_alignment = True
                 elif "(%)" in col_name or "%" in col_name:
@@ -205,7 +202,7 @@ def main():
                                 cell.number_format = number_format
             
             wb.save(filename)
-            print(f"★★★ 成功: {filename} に保存しました (新フォーマット) ★★★")
+            print(f"★★★ 成功: {filename} に保存しました (千単位・カッコ表示・Market列追加) ★★★")
             
         except Exception as e:
             print(f"エラー: Excel保存に失敗しました ({e})")

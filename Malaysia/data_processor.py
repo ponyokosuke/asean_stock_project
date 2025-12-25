@@ -156,14 +156,12 @@ def extract_data(code, raw_data):
     # --- 比率計算 ---
     debt_equity_ratio = None
     if total_equity and total_equity != 0 and total_assets and total_assets != 0:
-         # Debt/Equity = (総資産 - 純資産) / 純資産
          total_liabilities = total_assets - total_equity
          debt_equity_ratio = (total_liabilities / total_equity)
 
     loan_equity_ratio = None
     if total_equity and total_equity != 0 and loan is not None:
          loan_equity_ratio = (loan / total_equity)
-
 
     # --- 基本情報 ---
     fy_date = None
@@ -201,6 +199,27 @@ def extract_data(code, raw_data):
     
     website = info.get('website', '')
 
+    # --- Market 判定ロジック (マレーシア特別対応) ---
+    market = info.get('exchange', 'Unknown')
+    
+    # マレーシア (.KL) の場合、コード番号で市場を判定する
+    if str(code).endswith('.KL'):
+        # コードから数字部分のみを抽出 (例: "0012.KL" -> "0012")
+        ticker_clean = str(code).replace('.KL', '')
+        
+        # LEAP Market: 5桁で 03 で始まる (例: 03011)
+        if len(ticker_clean) == 5 and ticker_clean.startswith('03'):
+            market = "LEAP"
+        # ACE Market: 4桁で 0 で始まる (例: 0012, 0128)
+        elif len(ticker_clean) == 4 and ticker_clean.startswith('0'):
+            market = "ACE"
+        # Main Market: 4桁で 1~9 で始まる (例: 4863, 6012)
+        elif len(ticker_clean) == 4 and ticker_clean[0] in '123456789':
+            market = "Main"
+        # それ以外 (Warrant等)
+        else:
+            market = "Main/Other"
+
     # --- 結果の辞書作成 ---
     result = {
         "Name of Company": info.get('longName'),
@@ -209,6 +228,7 @@ def extract_data(code, raw_data):
         "Website": website,
         "Major Shareholders": shareholder_text,
         "FY": fy_date,
+        "Market": market, # ★判定したMarketを格納
         "REVENUE": revenue,
         
         "PROFIT": profit,
@@ -233,9 +253,8 @@ def extract_data(code, raw_data):
         "Contact No.": info.get('phone'),
         "Number of Employee": info.get('fullTimeEmployees'),
         
-        # ★変更: YahooFinのデータをこちらのキーに入れる
-        "Category Classification/YahooFin": sector if sector else "Not Available",
-        "Sector & Industry/YahooFin": industry if industry else "Not Available"
+        "Category Classification/ShareInvestor": sector if sector else "Not Available",
+        "Sector & Industry ShareInvestor": industry if industry else "Not Available"
     }
 
     return result
@@ -255,7 +274,7 @@ def format_for_excel(df):
         'Loan'
     ]
     
-    # 単位: 1000
+    # 単位: 千
     divisor = 1000.0
 
     for col in money_cols:
@@ -271,12 +290,8 @@ def format_for_excel(df):
     # 列名変更 (Mil) -> ('000)
     rename_map = {c: f"{c} ('000)" for c in money_cols}
     df = df.rename(columns=rename_map)
-    
-    # ★変更: REVENUE ('000) を REVENUE SGD('000) に変更
-    if "REVENUE ('000)" in df.columns:
-        df = df.rename(columns={"REVENUE ('000)": "REVENUE SGD('000)"})
 
-    # 日付変更 'Month YYYY'
+    # 日付変更 'Dec 2024'
     print("日付を 'Month YYYY' 形式に変換しています...")
     date_cols = ['FY']
     for col in date_cols:
