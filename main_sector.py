@@ -7,13 +7,13 @@ import time
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 
-# 既存モジュールをインポート
+# 必要なモジュールをインポート
 import yfinance_client
 import data_processor
-import asean_stock_codes # ★★★ 変更: 新しいリストファイルをインポート ★★★
+import asean_stock_codes # 銘柄リストファイル
 
 def main():
-    print("=== 国・セクター別 ASEAN株 財務データ取得システム (リストベース版) ===")
+    print("=== 国・セクター別 ASEAN株 財務データ取得システム (AIセグメント分析対応版) ===")
     
     # ---------------------------------------------------------
     # 1. 国（取引所）の選択
@@ -37,21 +37,8 @@ def main():
     
     # サフィックスの定義
     suffix_map = {
-        "SG": ".SI",
-        "MY": ".KL",
-        "ID": ".JK",
-        "TH": ".BK",
-        "VN": ".VN",
-        "PH": ".PS"
-    }
-    
-    suffix_to_country_name = {
-        ".SI": "Singapore",
-        ".KL": "Malaysia",
-        ".BK": "Thailand",
-        ".JK": "Indonesia",
-        ".PS": "Philippines",
-        ".VN": "Vietnam"
+        "SG": ".SI", "MY": ".KL", "ID": ".JK", 
+        "TH": ".BK", "VN": ".VN", "PH": ".PS"
     }
     
     target_suffixes = []
@@ -84,7 +71,6 @@ def main():
     # ---------------------------------------------------------
     print("内蔵リストから対象国の銘柄を抽出しています...")
     
-    # ★★★ 変更: 新しいファイルから全コードを取得 ★★★
     all_codes = asean_stock_codes.ALL_ASEAN_CODES
     country_filtered_codes = []
     
@@ -100,12 +86,12 @@ def main():
         return
 
     # ---------------------------------------------------------
-    # 4. セクターによるスクリーニング
+    # 4. セクターによるスクリーニング (yfinance)
     # ---------------------------------------------------------
     target_codes = []
     import yfinance as yf
 
-    print("セクター検索を開始します...")
+    print("セクター検索を開始します (yfinance)...")
     for i, code in enumerate(country_filtered_codes):
         print(f"\rスクリーニング中: {i+1}/{len(country_filtered_codes)} ({code})", end="")
         
@@ -136,9 +122,9 @@ def main():
         return
 
     # ---------------------------------------------------------
-    # 5. 詳細データ取得 & Excel生成
+    # 5. 詳細データ取得
     # ---------------------------------------------------------
-    print("\n詳細データの取得とExcel生成を開始します...")
+    print("\n詳細データの取得を開始します...")
     
     all_results = []
     
@@ -149,23 +135,6 @@ def main():
         
         if raw_data:
             processed_data = data_processor.extract_data(code, raw_data)
-            
-            # 国名の判定と追加
-            country_name = "Unknown"
-            for suffix, name in suffix_to_country_name.items():
-                if code.endswith(suffix):
-                    country_name = name
-                    break
-            # 特殊コード（日本株など）対応
-            if country_name == "Unknown":
-                if code in ["9402", "9407", "9471", "3775", "3808", "5579", "5241", "5039", "3849", "3739"]:
-                     country_name = "Japan (Nagoya/Sapporo)"
-                else:
-                    info = raw_data.get("info", {})
-                    country_name = info.get("country", "Unknown")
-
-            processed_data['Country'] = country_name
-
             all_results.append(processed_data)
             print(f"  会社名: {processed_data.get('Name of Company')}")
             print(f"  売上高: {processed_data.get('REVENUE')}")
@@ -174,50 +143,101 @@ def main():
             
         time.sleep(0.5)
 
-    # --- Excel保存処理 ---
+    # ---------------------------------------------------------
+    # 6. AIによるセグメント分析 (バッチ処理)
+    # ---------------------------------------------------------
+    if all_results:
+        print("\n--- 全データ取得完了。AIによるセグメント分析を開始します ---")
+        # data_processorのバッチ関数を呼び出してSegmentsを埋める
+        all_results = data_processor.batch_analyze_segments(all_results)
+
+    # ---------------------------------------------------------
+    # 7. Excel生成
+    # ---------------------------------------------------------
     if all_results:
         print("\nExcelファイルを作成しています...")
         df = pd.DataFrame(all_results)
         
-        # 整形
+        # 1. 数値整形 ('000 単位, Dec 2024形式へ)
+        # data_processor.format_for_excel が REVENUE SGD('000) へのリネームも行う
         df = data_processor.format_for_excel(df)
         
-        # 不要な列を削除
+        # 2. 不要な列を削除
         if "Sector /Industry" in df.columns:
             df = df.drop(columns=["Sector /Industry"])
             
-        # 指定された順番に並べ替え & 空列の追加
+        # 3. 指定された順番に並べ替え & 空列の追加
         df["Ref"] = range(1, len(df) + 1)
 
+        # 最新のフォーマットに合わせて空列を追加
         empty_cols = [
-            "ShareInvestor Category Classification", "Taka's comments", "Remarks", 
-            "Listed 'o' / Non Listed \"x\"", "Visited (V) / Meeting Proposal (MP)", 
-            "Segments", "Access", "Last Communications", 
-            "Number of Employee Previous (in 2024)", "Number of Employee Previous", 
-            "Incorporated (IN / Year)", "Category Classification SGX", "Sector /Industry SGX"
+            "Taka's comments",
+            "Remarks",
+            "Visited (V) / Meeting Proposal (MP)",
+            "Access",
+            "Last Communications",
+            "Category Classification/\nShareInvestor", # 改行あり
+            "Incorporated\n (IN / Year)",             # 改行あり
+            "Category Classification/SGX",
+            "Sector & Industry/ SGX"
         ]
+        
         for col in empty_cols:
             df[col] = ""
             
         df["Listed 'o' / Non Listed \"x\""] = "o"
-        df["ShareInvestor Category Classification"] = df["Category Classification/ShareInvestor"]
-        
+
+        # ★★★ 最新の列順序指定 ★★★
         target_order = [
-            "Ref", "Country", "Name of Company", "ShareInvestor Category Classification",
-            "Taka's comments", "Code", "Currency", "Exchange Rate (to SGD)", "Remarks",
-            "Listed 'o' / Non Listed \"x\"", "Visited (V) / Meeting Proposal (MP)", "Website",
-            "Major Shareholders", "FY", "REVENUE (Mil)", "Segments", "PROFIT (Mil)",
-            "GROSS PROFIT (Mil)", "OPERATING PROFIT (Mil)", "NET PROFIT (Group) (Mil)",
-            "NET PROFIT (Shareholders) (Mil)", "Minority Interest (Mil)", "Shareholders' Equity (Mil)",
-            "Total Equity (Mil)", "TOTAL ASSET (Mil)", "Debt/Equity(%)", "Loan (Mil)",
-            "Loan/Equity (%)", "Summary of Business", "Chairman / CEO", "Address",
-            "Contact No.", "Access", "Last Communications", "Number of Employee",
-            "Number of Employee Previous (in 2024)", "Number of Employee Previous",
-            "Category Classification/ShareInvestor", "Sector & Industry ShareInvestor",
-            "Incorporated (IN / Year)", "Category Classification SGX", "Sector /Industry SGX"
+            "Ref",
+            "Name of Company",
+            "Code",
+            "Listed 'o' / Non Listed \"x\"",
+            "Taka's comments",
+            "Remarks",
+            "Visited (V) / Meeting Proposal (MP)",
+            "Website",
+            "Major Shareholders",
+            "Currency",
+            "Exchange Rate (to SGD)",
+            "FY",
+            "REVENUE SGD('000)", 
+            "Segments", 
+            "PROFIT ('000)", 
+            "GROSS PROFIT ('000)", 
+            "OPERATING PROFIT ('000)", 
+            "NET PROFIT (Group) ('000)", 
+            "NET PROFIT (Shareholders) ('000)", 
+            "Minority Interest ('000)", 
+            "Shareholders' Equity ('000)", 
+            "Total Equity ('000)", 
+            "TOTAL ASSET ('000)", 
+            "Debt/Equity(%)", 
+            "Loan ('000)", 
+            "Loan/Equity (%)", 
+            "Summary of Business", 
+            "Chairman / CEO", 
+            "Address", 
+            "Contact No.", 
+            "Access", 
+            "Last Communications", 
+            "Number of Employee", 
+            "Category Classification/YahooFin", 
+            "Sector & Industry/YahooFin", 
+            "Category Classification/\nShareInvestor", 
+            "Incorporated\n (IN / Year)", 
+            "Category Classification/SGX", 
+            "Sector & Industry/ SGX"
         ]
         
+        # 存在しない列は空文字で補完
+        for col in target_order:
+             if col not in df.columns:
+                 df[col] = ""
+        
+        # 並べ替え実行
         df = df.reindex(columns=target_order)
+        # 従業員数の列名を修正 (Currentをつける)
         df = df.rename(columns={"Number of Employee": "Number of Employee Current"})
 
         # ファイル名生成
@@ -251,8 +271,9 @@ def main():
                 number_format = None
                 apply_alignment = False
                 
-                if "(Mil)" in col_name:
-                    number_format = '#,##0.000'
+                # 書式: 桁区切りとマイナス括弧
+                if "('000)" in col_name:
+                    number_format = '#,##0;(#,##0)'
                     apply_alignment = True
                 elif "(%)" in col_name or "%" in col_name:
                     number_format = '0.00%'

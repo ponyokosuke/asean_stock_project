@@ -1,8 +1,102 @@
 # data_processor.py
 import pandas as pd
 from datetime import datetime
+import os
+import time
+import json
+import google.generativeai as genai
+from dotenv import load_dotenv # pip install python-dotenv
 
-# format_shareholders 関数は変更なし
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+# 環境変数からAPIキーを取得
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# APIキーがあれば設定
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+def batch_analyze_segments(all_results_list):
+    """
+    リストにある全企業のデータをまとめてGeminiに投げ、セグメントを抽出して埋める
+    """
+    if not GEMINI_API_KEY:
+        print("  ⚠️ APIキー(.env)が見つからないため、AI分析をスキップします")
+        return all_results_list
+
+    # 概要(Summary of Business)がある企業だけを抽出
+    targets = [item for item in all_results_list if item.get('Summary of Business')]
+    
+    if not targets:
+        return all_results_list
+
+    print(f"\n🤖 Gemini AI分析開始: 対象 {len(targets)} 件をまとめて処理します (バッチ処理)...")
+    
+    # ★変更点: モデル名を 'gemini-1.5-flash-latest' に変更 (または 'gemini-pro')
+    model = genai.GenerativeModel('gemini-2.5-flash')
+
+    # 20社ずつ小分けにして送信
+    batch_size = 20
+    
+    for i in range(0, len(targets), batch_size):
+        batch = targets[i : i + batch_size]
+        current_count = min(i + batch_size, len(targets))
+        print(f"  - バッチ処理中: {i+1}〜{current_count} 件目...")
+
+        # プロンプト用のデータ作成 (コードと概要のペア)
+        input_text = ""
+        for item in batch:
+            summary_snippet = str(item['Summary of Business'])[:500].replace("\n", " ")
+            input_text += f"Code: {item['Code']}\nSummary: {summary_snippet}...\n---\n"
+
+        prompt = f"""
+        You are a financial analyst. I will provide business summaries for multiple companies.
+        Extract the main 'Business Segments' for EACH company based on the summary.
+
+        # Input Data
+        {input_text}
+        
+        # Output Rules
+        - Return ONLY a valid JSON object.
+        - The keys must be the stock 'Code'.
+        - The values must be the 'Business Segments' (comma separated string, clear and concise).
+        - If segments are not clearly stated, summarize the main business areas in 3-4 words.
+        - Example JSON Format:
+        {{
+            "4863.KL": "Telecommunication Services, Digital Solutions",
+            "0021.KL": "Payment Services, Solution Services"
+        }}
+        """
+
+        try:
+            # AIに送信
+            response = model.generate_content(prompt)
+            response_text = response.text.strip()
+            
+            # JSON部分だけを取り出す
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+            
+            # JSONをパース
+            segments_map = json.loads(response_text)
+
+            # 結果を元のリストに反映
+            for item in batch:
+                code = item['Code']
+                if code in segments_map:
+                    item['Segments'] = segments_map[code]
+            
+            time.sleep(1)
+
+        except Exception as e:
+            print(f"  ⚠️ バッチ処理エラー (このバッチはスキップします): {e}")
+
+    print("✅ AI分析完了\n")
+    return all_results_list
+
 def format_shareholders(holders_data, data_type="institutional"):
     """
     株主データを '名前: 保有比率%' の形式に整形する関数
@@ -156,14 +250,12 @@ def extract_data(code, raw_data):
     # --- 比率計算 ---
     debt_equity_ratio = None
     if total_equity and total_equity != 0 and total_assets and total_assets != 0:
-         # Debt/Equity = (総資産 - 純資産) / 純資産
          total_liabilities = total_assets - total_equity
          debt_equity_ratio = (total_liabilities / total_equity)
 
     loan_equity_ratio = None
     if total_equity and total_equity != 0 and loan is not None:
          loan_equity_ratio = (loan / total_equity)
-
 
     # --- 基本情報 ---
     fy_date = None
@@ -200,6 +292,19 @@ def extract_data(code, raw_data):
         currency = 'RMB (CNY)'
     
     website = info.get('website', '')
+    
+    # --- Market 判定 (マレーシア対応) ---
+    market = info.get('exchange', 'Unknown')
+    if str(code).endswith('.KL'):
+        ticker_clean = str(code).replace('.KL', '')
+        if len(ticker_clean) == 5 and ticker_clean.startswith('03'):
+            market = "LEAP"
+        elif len(ticker_clean) == 4 and ticker_clean.startswith('0'):
+            market = "ACE"
+        elif len(ticker_clean) == 4 and ticker_clean[0] in '123456789':
+            market = "Main"
+        else:
+            market = "Main/Other"
 
     # --- 結果の辞書作成 ---
     result = {
@@ -210,6 +315,7 @@ def extract_data(code, raw_data):
         "Major Shareholders": shareholder_text,
         "FY": fy_date,
         "REVENUE": revenue,
+        "Segments": "", # ★ここでは空欄。後でバッチ処理で埋める
         
         "PROFIT": profit,
         "GROSS PROFIT": gross_profit,
@@ -227,15 +333,15 @@ def extract_data(code, raw_data):
         "Loan": loan,
         "Loan/Equity (%)": loan_equity_ratio,
         
-        "Summary of Business": info.get('longBusinessSummary'),
+        "Summary of Business": info.get('longBusinessSummary', ''),
         "Chairman / CEO": top_exec,
         "Address": full_address,
         "Contact No.": info.get('phone'),
         "Number of Employee": info.get('fullTimeEmployees'),
         
-        # ★変更: YahooFinのデータをこちらのキーに入れる
         "Category Classification/YahooFin": sector if sector else "Not Available",
-        "Sector & Industry/YahooFin": industry if industry else "Not Available"
+        "Sector & Industry/YahooFin": industry if industry else "Not Available",
+        "Market": market
     }
 
     return result
@@ -272,7 +378,7 @@ def format_for_excel(df):
     rename_map = {c: f"{c} ('000)" for c in money_cols}
     df = df.rename(columns=rename_map)
     
-    # ★変更: REVENUE ('000) を REVENUE SGD('000) に変更
+    # REVENUE ('000) を REVENUE SGD('000) に変更
     if "REVENUE ('000)" in df.columns:
         df = df.rename(columns={"REVENUE ('000)": "REVENUE SGD('000)"})
 

@@ -1,10 +1,10 @@
-# main.py
 import pandas as pd
 import datetime
 from pathlib import Path
 import sys
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment
+# ★追加: PatternFillとFontをインポート
+from openpyxl.styles import Alignment, PatternFill, Font
 
 # --- CSVから stock_codes_list.py を生成する関数 ---
 def update_stock_codes_list_file(csv_file_path):
@@ -75,6 +75,11 @@ def main():
         else:
             print("  データの取得に失敗しました。")
 
+    # --- ★追加: バッチ処理でAI分析 (セグメント抽出) ---
+    if all_results:
+        print("\n--- 全データ取得完了。AIによるセグメント分析を開始します ---")
+        all_results = data_processor.batch_analyze_segments(all_results)
+
     # --- Excel保存処理 ---
     if all_results:
         print("\nExcelファイルを作成しています...")
@@ -83,33 +88,30 @@ def main():
         # 1. 整形 ('000 単位, Dec 2024形式へ)
         df = data_processor.format_for_excel(df)
         
-        # 2. 不要な列を削除 (古い列名)
+        # 2. 不要な列を削除
         if "Sector /Industry" in df.columns:
             df = df.drop(columns=["Sector /Industry"])
             
         # 3. 指定された順番に並べ替え & 空列の追加
         df["Ref"] = range(1, len(df) + 1)
 
-        # ★変更: 空欄にする列のリスト
         empty_cols = [
             "Taka's comments",
             "Remarks",
             "Visited (V) / Meeting Proposal (MP)",
             "Access",
             "Last Communications",
-            "Category Classification/\nShareInvestor", # 改行コード含む可能性を考慮
+            "Category Classification/\nShareInvestor", 
             "Incorporated\n (IN / Year)",
             "Category Classification/SGX",
             "Sector & Industry/ SGX"
         ]
         
-        # 空列を作成
         for col in empty_cols:
             df[col] = ""
         
         df["Listed 'o' / Non Listed \"x\""] = "o"
 
-        # ★変更: 新しいターゲットオーダー
         target_order = [
             "Ref",
             "Name of Company",
@@ -123,7 +125,7 @@ def main():
             "Currency",
             "Exchange Rate (to SGD)",
             "FY",
-            "REVENUE SGD('000)", # リネーム後の名前
+            "REVENUE SGD('000)",
             "Segments",
             "PROFIT ('000)",
             "GROSS PROFIT ('000)",
@@ -158,7 +160,6 @@ def main():
                  df[col] = ""
         
         df = df.reindex(columns=target_order)
-        # 従業員数の列名変更
         df = df.rename(columns={"Number of Employee": "Number of Employee Current"})
 
         # ファイル名生成
@@ -180,13 +181,26 @@ def main():
             ws = wb.active
             right_align = Alignment(horizontal='right')
             
+            # --- ★ここから追加・変更したデザイン設定 ---
+            # 背景色: 黄色 (FFFF00)
+            header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            # フォント: 太字
+            header_font = Font(bold=True)
+
+            # 1行目(ヘッダー)をループして適用
             for cell in ws[1]:
                 col_name = str(cell.value)
                 col_idx = cell.column
+                
+                # デザイン適用
+                cell.fill = header_fill
+                cell.font = header_font
+                
+                # --- 以下、数値フォーマット処理 ---
                 number_format = None
                 apply_alignment = False
                 
-                # ★書式設定: マイナスはカッコ、カンマ区切り
+                # 書式判定
                 if "('000)" in col_name:
                     number_format = '#,##0;(#,##0)'
                     apply_alignment = True
@@ -196,16 +210,17 @@ def main():
                 elif col_name == "FY":
                     apply_alignment = True
                 
+                # 列全体に書式を適用
                 if number_format or apply_alignment:
                     for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
-                        for cell in row:
+                        for cell_data in row:
                             if apply_alignment:
-                                cell.alignment = right_align
+                                cell_data.alignment = right_align
                             if number_format:
-                                cell.number_format = number_format
+                                cell_data.number_format = number_format
             
             wb.save(filename)
-            print(f"★★★ 成功: {filename} に保存しました (新フォーマット) ★★★")
+            print(f"★★★ 成功: {filename} に保存しました ★★★")
             
         except Exception as e:
             print(f"エラー: Excel保存に失敗しました ({e})")
