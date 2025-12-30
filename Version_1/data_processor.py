@@ -1,29 +1,23 @@
-# data_processor.py
 import pandas as pd
+import yfinance as yf
 from datetime import datetime
-import os
 import time
 import json
+import os
 from google import genai
 from dotenv import load_dotenv
 
-# .envファイルから環境変数を読み込む
 load_dotenv()
-
-# 環境変数からAPIキーを取得
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# クライアントの初期化
 client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
+# --- 1. AIによるセグメント分析 ---
 def batch_analyze_segments(all_results_list):
-    """
-    リストにある全企業のデータをまとめてGeminiに投げ、セグメントを抽出して埋める
-    """
     if not client:
-        print("  ⚠️ APIキー(.env)が見つからない、またはクライアント初期化失敗のため、AI分析をスキップします")
+        print("  ⚠️ APIキー(.env)が見つからないため、AI分析をスキップします")
         return all_results_list
 
     targets = [item for item in all_results_list if item.get('Summary of Business')]
@@ -33,8 +27,8 @@ def batch_analyze_segments(all_results_list):
 
     print(f"\n🤖 Gemini AI分析開始: 対象 {len(targets)} 件をまとめて処理します (バッチ処理)...")
     
-    # バッチサイズ
     batch_size = 20
+    model_name = 'gemini-2.5-flash'
     
     for i in range(0, len(targets), batch_size):
         batch = targets[i : i + batch_size]
@@ -67,12 +61,11 @@ def batch_analyze_segments(all_results_list):
 
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model=model_name,
                 contents=prompt
             )
             response_text = response.text.strip()
             
-            # JSON部分だけを取り出す
             if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
@@ -93,6 +86,67 @@ def batch_analyze_segments(all_results_list):
     print("✅ AI分析完了\n")
     return all_results_list
 
+
+# --- 2. データ取得関数 ---
+def get_stock_data(code):
+    try:
+        ticker = yf.Ticker(code)
+        try:
+            info = ticker.info
+        except:
+            return None
+            
+        if not info:
+            return None
+
+        raw_data = {
+            "info": info,
+            "balance_sheet": ticker.balance_sheet,
+            "financials": ticker.financials,
+            "major_holders": ticker.major_holders,
+            "institutional_holders": ticker.institutional_holders
+        }
+        return raw_data
+    except Exception as e:
+        print(f"  データ取得エラー: {e}")
+        return None
+
+# ★変更: 為替レートも「前日終値」を優先取得
+def get_exchange_rate(from_currency):
+    """
+    指定された通貨からSGDへの為替レート (SGD/外貨) を取得します。
+    整合性を保つため、株価と同様に 'previousClose' を優先します。
+    """
+    if not from_currency or from_currency == "SGD":
+        return 1.0
+    
+    if from_currency == "RMB (CNY)":
+        currency_code = "CNY"
+    else:
+        currency_code = from_currency
+
+    pair = f"{currency_code}SGD=X"
+    
+    try:
+        ticker = yf.Ticker(pair)
+        
+        # 1. まず info から previousClose (前日終値) を取得
+        rate = ticker.info.get('previousClose')
+        
+        # 2. 取れなければ履歴データの最新終値で代用
+        if rate is None:
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                rate = hist['Close'].iloc[-1]
+            else:
+                return "N/A"
+        
+        return rate
+    except:
+        return "N/A"
+
+
+# --- 3. データの整形・抽出 ---
 def format_shareholders(holders_data, data_type="institutional"):
     if holders_data is None or holders_data.empty:
         return None
@@ -261,11 +315,19 @@ def extract_data(code, raw_data):
 
     sector = info.get('sector')
     industry = info.get('industry')
-    currency = info.get('financialCurrency')
-    if not currency:
-        currency = info.get('currency', 'N/A')
-    if currency == 'CNY':
-        currency = 'RMB (CNY)'
+    
+    # 通貨情報の取得と整形
+    raw_currency = info.get('financialCurrency')
+    if not raw_currency:
+        raw_currency = info.get('currency', 'SGD') 
+        
+    display_currency = raw_currency
+    if display_currency == 'CNY':
+        display_currency = 'RMB (CNY)'
+    
+    # 為替レートの取得 (前日終値)
+    exchange_rate = get_exchange_rate(display_currency)
+
     website = info.get('website', '')
     
     market = info.get('exchange', 'Unknown')
@@ -280,22 +342,29 @@ def extract_data(code, raw_data):
         else:
             market = "Main/Other"
     
-    # --- ★追加: 株価、発行株数、時価総額 ---
-    current_price = info.get('currentPrice')
+    # ★変更: 株価は「前日終値 (previousClose)」を使用する
+    current_price = info.get('previousClose')
+    # 取れない場合は現在値で代用
     if current_price is None:
         current_price = info.get('regularMarketPrice')
-    
-    shares_outstanding = info.get('sharesOutstanding')
-    market_cap = info.get('marketCap')
 
-    # 現在日時を取得 (英語形式: Dec 29 09:00)
-    now_str = datetime.now().strftime("%b %d %H:%M")
-    stock_price_col_name = f"Stock Price ({now_str})"
+    shares_outstanding = info.get('sharesOutstanding')
+    
+    # 時価総額の計算 (前日終値 x 発行済株式数)
+    market_cap = None
+    if current_price and shares_outstanding:
+        market_cap = current_price * shares_outstanding
+    else:
+        # 計算不能ならYahooの値をそのまま使う
+        market_cap = info.get('marketCap')
+
+    stock_price_col_name = "Stock Price"
 
     result = {
         "Name of Company": info.get('longName'),
         "Code": code,
-        "Currency": currency,
+        "Currency": display_currency,
+        "Exchange Rate": exchange_rate,
         "Website": website,
         "Major Shareholders": shareholder_text,
         "FY": fy_date,
@@ -314,7 +383,6 @@ def extract_data(code, raw_data):
         "Loan": loan,
         "Loan/Equity (%)": loan_equity_ratio,
         
-        # ★追加: 新しい3項目
         stock_price_col_name: current_price,
         "Shares Outstanding": shares_outstanding,
         "Market Cap": market_cap,
@@ -328,17 +396,11 @@ def extract_data(code, raw_data):
         "Sector & Industry/YahooFin": industry if industry else "Not Available",
         "Market": market
     }
-
     return result
 
-
+# --- 4. Excel出力用整形 ---
 def format_for_excel(df):
-    """
-    Excel出力用に整形
-    """
     print("データを千単位('000)に変換しています...")
-    
-    # 単位換算対象リストに Market Cap と Shares Outstanding を追加
     money_cols = [
         'REVENUE', 'PROFIT', 'GROSS PROFIT', 'OPERATING PROFIT', 
         'NET PROFIT (Group)', 'NET PROFIT (Shareholders)',
@@ -361,7 +423,6 @@ def format_for_excel(df):
          if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # 列名変更 (Mil) -> ('000)
     rename_map = {c: f"{c} ('000)" for c in money_cols}
     df = df.rename(columns=rename_map)
     

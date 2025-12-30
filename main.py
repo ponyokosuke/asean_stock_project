@@ -1,10 +1,15 @@
+# main.py
 import pandas as pd
 import datetime
 from pathlib import Path
 import sys
+import time
 from openpyxl import load_workbook
-# ★追加: PatternFillとFontをインポート
 from openpyxl.styles import Alignment, PatternFill, Font
+
+import yfinance_client
+import data_processor
+import stock_codes_list 
 
 # --- CSVから stock_codes_list.py を生成する関数 ---
 def update_stock_codes_list_file(csv_file_path):
@@ -75,7 +80,7 @@ def main():
         else:
             print("  データの取得に失敗しました。")
 
-    # --- ★追加: バッチ処理でAI分析 (セグメント抽出) ---
+    # --- バッチ処理でAI分析 (セグメント抽出) ---
     if all_results:
         print("\n--- 全データ取得完了。AIによるセグメント分析を開始します ---")
         all_results = data_processor.batch_analyze_segments(all_results)
@@ -112,6 +117,10 @@ def main():
         
         df["Listed 'o' / Non Listed \"x\""] = "o"
 
+        # ★追加: 株価のカラム名を動的に特定 (日時が入るため)
+        stock_price_col = next((col for col in df.columns if str(col).startswith("Stock Price")), "Stock Price")
+
+        # ★★★ 新しいターゲットオーダー ★★★
         target_order = [
             "Ref",
             "Name of Company",
@@ -139,6 +148,12 @@ def main():
             "Debt/Equity(%)",
             "Loan ('000)",
             "Loan/Equity (%)",
+            
+            # ★追加: ここに3項目を挿入
+            stock_price_col,              # 株価 (日付入り)
+            "Shares Outstanding ('000)",  # 発行株式数
+            "Market Cap ('000)",          # 時価総額
+            
             "Summary of Business",
             "Chairman / CEO",
             "Address",
@@ -181,22 +196,17 @@ def main():
             ws = wb.active
             right_align = Alignment(horizontal='right')
             
-            # --- ★ここから追加・変更したデザイン設定 ---
-            # 背景色: 黄色 (FFFF00)
+            # デザイン設定
             header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-            # フォント: 太字
             header_font = Font(bold=True)
 
-            # 1行目(ヘッダー)をループして適用
             for cell in ws[1]:
                 col_name = str(cell.value)
                 col_idx = cell.column
                 
-                # デザイン適用
                 cell.fill = header_fill
                 cell.font = header_font
                 
-                # --- 以下、数値フォーマット処理 ---
                 number_format = None
                 apply_alignment = False
                 
@@ -209,8 +219,11 @@ def main():
                     apply_alignment = True
                 elif col_name == "FY":
                     apply_alignment = True
+                # ★追加: 株価は小数点表示
+                elif "Stock Price" in col_name:
+                    number_format = '#,##0.000'
+                    apply_alignment = True
                 
-                # 列全体に書式を適用
                 if number_format or apply_alignment:
                     for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
                         for cell_data in row:
