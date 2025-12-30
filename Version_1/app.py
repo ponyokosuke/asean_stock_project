@@ -4,6 +4,7 @@ import time
 import io
 import os
 from datetime import datetime
+from openpyxl.styles import PatternFill, Font, Alignment
 
 # Import existing logic
 import data_processor
@@ -109,13 +110,15 @@ if st.button("Start Analysis 🚀"):
                 df["Listed 'o' / Non Listed \"x\""] = "o"
 
                 # Rename Date Columns
-                now_str = datetime.now().strftime("%b %d")
+                # Calculate YESTERDAY'S date for "Previous Close"
+                yesterday = datetime.now() - pd.Timedelta(days=1)
+                yesterday_str = yesterday.strftime("%b %d")
                 
-                final_stock_price_col = f"Stock Price (Prev. Close as of {now_str})"
+                final_stock_price_col = f"Stock Price (Prev. Close as of {yesterday_str})"
                 if "Stock Price" in df.columns:
                     df = df.rename(columns={"Stock Price": final_stock_price_col})
                     
-                final_rate_col = f"Exchange Rate (to SGD) (Prev. Close as of {now_str})"
+                final_rate_col = f"Exchange Rate (to SGD) (Prev. Close as of {yesterday_str})"
                 if "Exchange Rate" in df.columns:
                     df = df.rename(columns={"Exchange Rate": final_rate_col})
 
@@ -150,11 +153,58 @@ if st.button("Start Analysis 🚀"):
                 df = df.loc[:, ~df.columns.duplicated()]
                 df = df.reindex(columns=target_order)
 
-                # Save to Buffer
+                # Save to Buffer with Styling
                 buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False)
                 
+                # Using openpyxl engine to access the workbook for styling
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Sheet1')
+                    
+                    # Access the worksheet
+                    workbook = writer.book
+                    worksheet = writer.sheets['Sheet1']
+                    
+                    # Define Styles
+                    header_fill = PatternFill(start_color="fefe99", end_color="fefe99", fill_type="solid")
+                    header_font = Font(bold=True)
+                    right_align = Alignment(horizontal='right')
+                    
+                    # Iterate through the header row (Row 1)
+                    for cell in worksheet[1]:
+                        cell.fill = header_fill
+                        cell.font = header_font
+                        
+                        # Apply Number Formats based on column name
+                        col_name = str(cell.value)
+                        col_idx = cell.column
+                        
+                        number_format = None
+                        apply_alignment = False
+                        
+                        if "('000)" in col_name:
+                            number_format = '#,##0;(#,##0)'
+                            apply_alignment = True
+                        elif "(%)" in col_name or "%" in col_name:
+                            number_format = '0.00%'
+                            apply_alignment = True
+                        elif col_name == "FY":
+                            apply_alignment = True
+                        elif "Stock Price" in col_name:
+                            number_format = '#,##0.000'
+                            apply_alignment = True
+                        elif "Exchange Rate" in col_name:
+                            number_format = '0.0000'
+                            apply_alignment = True
+                            
+                        # Apply format to the data column below the header
+                        if number_format or apply_alignment:
+                             for row in worksheet.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                                for cell_data in row:
+                                    if apply_alignment:
+                                        cell_data.alignment = right_align
+                                    if number_format:
+                                        cell_data.number_format = number_format
+
                 buffer.seek(0)
                 
                 # Download Button
