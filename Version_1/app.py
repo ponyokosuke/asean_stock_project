@@ -3,8 +3,13 @@ import pandas as pd
 import time
 import io
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
+from dotenv import load_dotenv # 追加
+
+# .envファイルを読み込む
+load_dotenv()
 
 # Import existing logic
 import data_processor
@@ -12,215 +17,181 @@ import data_processor
 # Page config
 st.set_page_config(page_title="ASEAN Stock Analyzer", layout="wide")
 
-st.title("📊 ASEAN Stock Financial & AI Analysis Tool")
-st.markdown("Upload a stock list (CSV) to integrate Yahoo Finance data with Gemini AI analysis and export to Excel.")
+# 環境変数からパスワードとAPIキーを取得
+env_password = os.environ.get("APP_PASSWORD")
+env_gemini_key = os.environ.get("GEMINI_API_KEY")
 
-# --- Sidebar: Settings ---
+# --- 🔐 PASSWORD AUTHENTICATION ---
+def password_entered():
+    if st.session_state["password"] == env_password:
+        st.session_state["password_correct"] = True
+        del st.session_state["password"]
+    else:
+        st.session_state["password_correct"] = False
+
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.text_input("Please enter the password:", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input("Please enter the password:", type="password", on_change=password_entered, key="password")
+        st.error("😕 Password incorrect")
+        return False
+    return True
+
+if not check_password():
+    st.stop()
+
+# --- 💾 SESSION STATE INITIALIZATION ---
+if "excel_buffer" not in st.session_state:
+    st.session_state.excel_buffer = None
+if "final_df" not in st.session_state:
+    st.session_state.final_df = None
+
+# --- 🛠 HELPERS ---
+def clean_duplicate_columns(df, step_name=""):
+    if df.columns.duplicated().any():
+        duplicated_cols = df.columns[df.columns.duplicated()].tolist()
+        if st.session_state.get("debug_mode"):
+            st.warning(f"[{step_name}] 重複列を検出しました: {duplicated_cols}")
+        return df.loc[:, ~df.columns.duplicated()].copy()
+    return df
+
+# --- MAIN APP ---
+st.title("📊 ASEAN Stock Financial & AI Analysis Tool")
+
 with st.sidebar:
     st.header("Settings")
+    debug_mode = st.checkbox("Debug Mode (列名の状態を表示)", key="debug_mode")
     
-    # API Key Input
-    api_key = st.text_input("Gemini API Key", type="password", help="Leave blank if configured in Secrets")
-    
-    if api_key:
-        os.environ["GEMINI_API_KEY"] = api_key
-        # Re-initialize client
+    # st.secrets ではなく os.environ を使用するように修正
+    if env_gemini_key:
+        os.environ["GEMINI_API_KEY"] = env_gemini_key
         from google import genai
-        data_processor.client = genai.Client(api_key=api_key)
+        data_processor.client = genai.Client(api_key=env_gemini_key)
+        st.success("API Key loaded from .env ✅")
+    else:
+        api_key = st.text_input("Gemini API Key", type="password")
+        if api_key:
+            os.environ["GEMINI_API_KEY"] = api_key
+            from google import genai
+            data_processor.client = genai.Client(api_key=api_key)
 
-# --- File Uploader ---
 uploaded_file = st.file_uploader("Upload Stock List (CSV)", type=["csv"])
-
-# Sample Data Option
 use_sample = st.checkbox("Use default list (asean_list.csv) if no file is available")
 
+# --- EXECUTE ANALYSIS ---
 if st.button("Start Analysis 🚀"):
-    target_csv = None
-    
-    if uploaded_file is not None:
-        target_csv = uploaded_file
-    elif use_sample:
-        target_csv = "asean_list.csv"
+    target_csv = uploaded_file if uploaded_file else ("asean_list.csv" if use_sample else None)
     
     if target_csv is None:
-        st.error("Please upload a CSV file or select the default list.")
+        st.error("Please upload a CSV file.")
     else:
-        # --- Start Analysis ---
-        status_text = st.empty()
-        progress_bar = st.progress(0)
-        
         try:
-            # Read CSV
-            if isinstance(target_csv, str):
-                df_input = pd.read_csv(target_csv, header=None)
-            else:
-                df_input = pd.read_csv(target_csv, header=None)
-                
+            st.session_state.excel_buffer = None
+            df_input = pd.read_csv(target_csv, header=None)
             codes = df_input[0].astype(str).tolist()
-            total_codes = len(codes)
             
-            st.info(f"Retrieving data for {total_codes} stocks...")
+            status_text = st.empty()
+            progress_bar = st.progress(0)
             
             all_results = []
-            
-            # 1. Data Retrieval Loop
             for i, code in enumerate(codes):
                 code = code.strip()
-                status_text.text(f"Processing ({i+1}/{total_codes}): Retrieving data for {code}...")
-                progress_bar.progress((i + 1) / (total_codes + 1))
-                
+                status_text.text(f"Processing ({i+1}/{len(codes)}): {code}...")
+                progress_bar.progress((i + 1) / (len(codes) + 1))
                 raw_data = data_processor.get_stock_data(code)
-                
                 if raw_data:
-                    processed_data = data_processor.extract_data(code, raw_data)
-                    all_results.append(processed_data)
-                
-                time.sleep(0.5) 
+                    all_results.append(data_processor.extract_data(code, raw_data))
+                time.sleep(0.2)
             
-            # 2. AI Analysis
             if all_results:
-                status_text.text("🤖 Running AI Segment Analysis... (This may take some time)")
+                status_text.text("🤖 Running AI Analysis...")
                 all_results = data_processor.batch_analyze_segments(all_results)
-            
-            progress_bar.progress(100)
-            status_text.text("✅ All processes completed!")
-            
-            # 3. Excel Creation
-            if all_results:
+                
                 df = pd.DataFrame(all_results)
+                df = clean_duplicate_columns(df, "DataFrame作成直後")
                 
-                # Format Data
-                df = df.loc[:, ~df.columns.duplicated()]
+                status_text.text("📏 Formatting data...")
                 df = data_processor.format_for_excel(df)
-                
-                if "Sector /Industry" in df.columns:
-                    df = df.drop(columns=["Sector /Industry"])
+                df = clean_duplicate_columns(df, "format_for_excel後")
                 
                 df["Ref"] = range(1, len(df) + 1)
-                
-                # Add Empty Columns
-                empty_cols = [
-                    "Taka's comments", "Remarks", "Visited (V) / Meeting Proposal (MP)",
-                    "Access", "Last Communications", "Category Classification/\nShareInvestor", 
-                    "Incorporated\n (IN / Year)", "Category Classification/SGX", "Sector & Industry/ SGX"
-                ]
+                empty_cols = ["Taka's comments", "Remarks", "Visited (V) / Meeting Proposal (MP)", "Access", "Last Communications", "Category Classification/\nShareInvestor", "Incorporated\n (IN / Year)", "Category Classification/SGX", "Sector & Industry/ SGX"]
                 for col in empty_cols:
-                    df[col] = ""
-                
+                    if col not in df.columns:
+                        df[col] = ""
                 df["Listed 'o' / Non Listed \"x\""] = "o"
 
-                # Rename Date Columns
-                # Calculate YESTERDAY'S date for "Previous Close"
-                yesterday = datetime.now() - pd.Timedelta(days=1)
+                yesterday = datetime.now() - timedelta(days=1)
                 yesterday_str = yesterday.strftime("%b %d")
+                final_stock_price_col = f"Stock Price ({yesterday_str}, Closing)"
+                final_rate_col = f"Exchange Rate (to SGD) ({yesterday_str}, Closing)"
                 
-                final_stock_price_col = f"Stock Price (Prev. Close as of {yesterday_str})"
-                if "Stock Price" in df.columns:
-                    df = df.rename(columns={"Stock Price": final_stock_price_col})
-                    
-                final_rate_col = f"Exchange Rate (to SGD) (Prev. Close as of {yesterday_str})"
-                if "Exchange Rate" in df.columns:
-                    df = df.rename(columns={"Exchange Rate": final_rate_col})
+                df = clean_duplicate_columns(df, "リネーム直前")
+                rename_dict = {}
+                if "Stock Price" in df.columns: rename_dict["Stock Price"] = final_stock_price_col
+                if "Exchange Rate" in df.columns: rename_dict["Exchange Rate"] = final_rate_col
+                if "Number of Employee" in df.columns: rename_dict["Number of Employee"] = "Number of Employee Current"
+                df = df.rename(columns=rename_dict)
+                
+                df = clean_duplicate_columns(df, "リネーム直後")
 
-                # Reorder Columns
+                status_text.text("🔄 Reordering columns...")
                 target_order = [
-                    "Ref", "Name of Company", "Code", "Listed 'o' / Non Listed \"x\"",
-                    "Taka's comments", "Remarks", "Visited (V) / Meeting Proposal (MP)",
-                    "Website", "Major Shareholders", "Currency", 
-                    final_rate_col, 
-                    "FY", "REVENUE SGD('000)", "Segments", "PROFIT ('000)",
-                    "GROSS PROFIT ('000)", "OPERATING PROFIT ('000)",
-                    "NET PROFIT (Group) ('000)", "NET PROFIT (Shareholders) ('000)",
-                    "Minority Interest ('000)", "Shareholders' Equity ('000)",
-                    "Total Equity ('000)", "TOTAL ASSET ('000)", "Debt/Equity(%)",
-                    "Loan ('000)", "Loan/Equity (%)",
-                    final_stock_price_col, 
-                    "Shares Outstanding ('000)", "Market Cap ('000)",
-                    "Summary of Business", "Chairman / CEO", "Address", "Contact No.",
-                    "Access", "Last Communications", "Number of Employee Current",
-                    "Category Classification/YahooFin", "Sector & Industry/YahooFin",
-                    "Category Classification/\nShareInvestor", "Incorporated\n (IN / Year)",
-                    "Category Classification/SGX", "Sector & Industry/ SGX"
+                    "Ref", "Name of Company", "Code", "Listed 'o' / Non Listed \"x\"", "Taka's comments", "Remarks", "Visited (V) / Meeting Proposal (MP)", "Website", "Major Shareholders", "Currency", final_rate_col, "FY", "REVENUE SGD('000)", "Segments", "PROFIT ('000)", "GROSS PROFIT ('000)", "OPERATING PROFIT ('000)", "NET PROFIT (Group) ('000)", "NET PROFIT (Shareholders) ('000)", "Minority Interest ('000)", "Shareholders' Equity ('000)", "Total Equity ('000)", "TOTAL ASSET ('000)", "Debt/Equity(%)", "Loan ('000)", "Loan/Equity (%)", final_stock_price_col, "Shares Outstanding ('000)", "Market Cap ('000)", "Summary of Business", "Chairman / CEO", "Address", "Contact No.", "Access", "Last Communications", "Number of Employee Current", "Category Classification/YahooFin", "Sector & Industry/YahooFin", "Category Classification/\nShareInvestor", "Incorporated\n (IN / Year)", "Category Classification/SGX", "Sector & Industry/ SGX"
                 ]
                 
                 for col in target_order:
                     if col not in df.columns:
                         df[col] = ""
                 
-                if "Number of Employee" in df.columns:
-                    df = df.rename(columns={"Number of Employee": "Number of Employee Current"})
+                df = clean_duplicate_columns(df, "Reindex直前最終チェック")
                 
-                df = df.loc[:, ~df.columns.duplicated()]
+                if debug_mode:
+                    st.write("Current Columns:", df.columns.tolist())
+
                 df = df.reindex(columns=target_order)
 
-                # Save to Buffer with Styling
-                buffer = io.BytesIO()
+                status_text.text("💾 Generating Excel file...")
+                temp_buffer = io.BytesIO()
+                df.to_excel(temp_buffer, index=False)
+                temp_buffer.seek(0)
                 
-                # Using openpyxl engine to access the workbook for styling
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Sheet1')
-                    
-                    # Access the worksheet
-                    workbook = writer.book
-                    worksheet = writer.sheets['Sheet1']
-                    
-                    # Define Styles
-                    header_fill = PatternFill(start_color="fefe99", end_color="fefe99", fill_type="solid")
-                    header_font = Font(bold=True)
-                    right_align = Alignment(horizontal='right')
-                    
-                    # Iterate through the header row (Row 1)
-                    for cell in worksheet[1]:
-                        cell.fill = header_fill
-                        cell.font = header_font
-                        
-                        # Apply Number Formats based on column name
-                        col_name = str(cell.value)
-                        col_idx = cell.column
-                        
-                        number_format = None
-                        apply_alignment = False
-                        
-                        if "('000)" in col_name:
-                            number_format = '#,##0;(#,##0)'
-                            apply_alignment = True
-                        elif "(%)" in col_name or "%" in col_name:
-                            number_format = '0.00%'
-                            apply_alignment = True
-                        elif col_name == "FY":
-                            apply_alignment = True
-                        elif "Stock Price" in col_name:
-                            number_format = '#,##0.000'
-                            apply_alignment = True
-                        elif "Exchange Rate" in col_name:
-                            number_format = '0.0000'
-                            apply_alignment = True
-                            
-                        # Apply format to the data column below the header
-                        if number_format or apply_alignment:
-                             for row in worksheet.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
-                                for cell_data in row:
-                                    if apply_alignment:
-                                        cell_data.alignment = right_align
-                                    if number_format:
-                                        cell_data.number_format = number_format
-
-                buffer.seek(0)
+                wb = load_workbook(temp_buffer)
+                ws = wb.active
+                header_fill = PatternFill(start_color="fefe99", end_color="fefe99", fill_type="solid")
+                for cell in ws[1]:
+                    cell.fill = header_fill
+                    cell.font = Font(bold=True)
                 
-                # Download Button
-                file_name = f"asean_financial_data_{datetime.today().strftime('%Y-%m-%d')}.xlsx"
+                final_buffer = io.BytesIO()
+                wb.save(final_buffer)
                 
-                st.success("Analysis Complete! Download the Excel file below.")
-                st.download_button(
-                    label="📥 Download Excel File",
-                    data=buffer,
-                    file_name=file_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.session_state.excel_buffer = final_buffer.getvalue()
+                st.session_state.final_df = df
+                st.session_state.output_filename = f"asean_financial_data_{datetime.today().strftime('%Y-%m-%d')}.xlsx"
                 
-                # Data Preview
-                st.subheader("Data Preview")
-                st.dataframe(df)
+                progress_bar.progress(100)
+                status_text.text("✅ All processes completed!")
 
         except Exception as e:
-            st.error(f"An error occurred: {e}")
+            st.error(f"❌ Error during processing: {e}")
+            if debug_mode:
+                st.exception(e)
+
+# --- 📥 DOWNLOAD AREA ---
+if st.session_state.excel_buffer is not None:
+    st.divider()
+    st.success("Analysis results ready!")
+    
+    st.download_button(
+        label="📥 Download Excel File",
+        data=st.session_state.excel_buffer,
+        file_name=st.session_state.output_filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_btn"
+    )
+    
+    st.subheader("Data Preview")
+    st.dataframe(st.session_state.final_df)
